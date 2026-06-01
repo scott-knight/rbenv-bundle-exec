@@ -1,65 +1,100 @@
 # rbenv-bundle-exec
-# Automatically runs ruby gem executables through `bundle exec` inside projects.
+# rbenv exec hook: automatically runs gem executables through `bundle exec`
+# when invoked from inside a Bundler project.
+#
+# Escape hatches:
+#   NO_BUNDLE_EXEC=1 sidekiq
+#   echo sidekiq >> ~/.no_bundle_exec
 
-[[ -n "$NO_BUNDLE_EXEC" ]] && return
-[[ "$RBENV_COMMAND" == "bundle" || "$RBENV_COMMAND" == "gem" ]] && return
+_rbe_cleanup() {
+  unset _rbe_command
+  unset _rbe_skip_file _rbe_skip_command
+  unset _rbe_pwd _rbe_dir _rbe_parent _rbe_depth _rbe_gemfile
+  unset -f _rbe_cleanup
+}
 
-command -v bundle > /dev/null 2>&1 || return
+_rbe_command="${RBENV_COMMAND-}"
 
-if [[ -f "$HOME/.no_bundle_exec" ]]; then
-  while IFS= read -r skip_cmd || [[ -n "$skip_cmd" ]]; do
-    [[ -z "$skip_cmd" || "$skip_cmd" == \#* ]] && continue
-    [[ "$RBENV_COMMAND" == "$skip_cmd" ]] && return
-  done < "$HOME/.no_bundle_exec"
+if [[ -z "$_rbe_command" ]]; then
+  _rbe_cleanup
+  return 0
 fi
 
-if [[ -z "$BUNDLE_GEMFILE" ]]; then
-  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/rbenv-bundle-exec"
-  cache_key="${PWD//\//%2F}"
-  cache_file="$cache_dir/$cache_key"
+case "$_rbe_command" in
+  bundle|gem|ruby|irb|erb|ri|rdoc)
+    _rbe_cleanup
+    return 0
+    ;;
+esac
 
-  if [[ -f "$PWD/Gemfile" ]]; then
-    BUNDLE_GEMFILE="$PWD/Gemfile"
-  elif [[ -f "$cache_file" ]]; then
-    IFS= read -r cached_gemfile < "$cache_file"
-
-    if [[ "$cached_gemfile" == "__none__" ]]; then
-      return
-    elif [[ -f "$cached_gemfile" ]]; then
-      BUNDLE_GEMFILE="$cached_gemfile"
-    fi
-  fi
-
-  if [[ -z "$BUNDLE_GEMFILE" ]]; then
-    dir="$PWD"
-    depth=0
-
-    while [[ -n "$dir" && $depth -lt 10 ]]; do
-      if [[ -f "$dir/Gemfile" ]]; then
-        BUNDLE_GEMFILE="$dir/Gemfile"
-        break
-      fi
-
-      [[ "$dir" == "/" ]] && break
-      dir="${dir%/*}"
-      (( depth++ ))
-    done
-
-    mkdir -p "$cache_dir" 2> /dev/null
-
-    if [[ -n "$BUNDLE_GEMFILE" ]]; then
-      printf '%s\n' "$BUNDLE_GEMFILE" > "$cache_file"
-    else
-      printf '%s\n' "__none__" > "$cache_file"
-      return
-    fi
-  fi
-
-  export BUNDLE_GEMFILE
+if [[ -n "${NO_BUNDLE_EXEC-}" ]]; then
+  _rbe_cleanup
+  return 0
 fi
 
-[[ -n "$DEBUG_RBENV_BUNDLE_EXEC" ]] && echo "bundle exec ${*}" >&2
+_rbe_skip_file="${HOME-}/.no_bundle_exec"
+if [[ -n "${HOME-}" && -f "$_rbe_skip_file" ]]; then
+  while IFS= read -r _rbe_skip_command || [[ -n "$_rbe_skip_command" ]]; do
+    case "$_rbe_skip_command" in
+      ""|\#*) continue ;;
+    esac
+
+    if [[ "$_rbe_command" == "$_rbe_skip_command" ]]; then
+      _rbe_cleanup
+      return 0
+    fi
+  done < "$_rbe_skip_file"
+fi
+
+if ! command -v bundle > /dev/null 2>&1; then
+  _rbe_cleanup
+  return 0
+fi
+
+# If the caller explicitly supplied a valid bundle, honor it.
+# If it is stale, ignore it and find the nearest Gemfile normally.
+if [[ -n "${BUNDLE_GEMFILE-}" && -f "$BUNDLE_GEMFILE" ]]; then
+  _rbe_gemfile="$BUNDLE_GEMFILE"
+else
+  unset BUNDLE_GEMFILE
+
+  _rbe_pwd="${PWD-}"
+  if [[ -z "$_rbe_pwd" ]]; then
+    _rbe_cleanup
+    return 0
+  fi
+
+  _rbe_dir="$_rbe_pwd"
+  _rbe_depth=0
+  _rbe_gemfile=""
+
+  while [[ -n "$_rbe_dir" && "$_rbe_depth" -lt 20 ]]; do
+    if [[ -f "$_rbe_dir/Gemfile" ]]; then
+      _rbe_gemfile="$_rbe_dir/Gemfile"
+      break
+    fi
+
+    [[ "$_rbe_dir" == "/" ]] && break
+
+    _rbe_parent="${_rbe_dir%/*}"
+    [[ "$_rbe_parent" == "$_rbe_dir" ]] && break
+
+    _rbe_dir="$_rbe_parent"
+    _rbe_depth=$(( _rbe_depth + 1 ))
+  done
+fi
+
+if [[ -z "$_rbe_gemfile" ]]; then
+  _rbe_cleanup
+  return 0
+fi
+
+export BUNDLE_GEMFILE="$_rbe_gemfile"
+
+[[ -n "${DEBUG_RBENV_BUNDLE_EXEC-}" ]] && echo "bundle exec ${*}" >&2
 
 RBENV_COMMAND="bundle"
 RBENV_COMMAND_PATH="bundle"
-set -- "bundle" "exec" "${@}"
+set -- "bundle" "exec" "$@"
+
+_rbe_cleanup
